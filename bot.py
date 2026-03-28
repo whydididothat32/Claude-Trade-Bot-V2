@@ -8,8 +8,8 @@ from datetime import datetime
 import pytz
 
 # ── Patch yfinance to use browser-like headers (bypasses Railway network block) ──
-import yfinance.utils as _yfu
 import requests as _req
+from yfinance import utils as _yfu
 
 _session = _req.Session()
 _session.headers.update({
@@ -19,7 +19,7 @@ _session.headers.update({
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
 })
-yf.set_session(_session)
+_yfu.requests = _session
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
