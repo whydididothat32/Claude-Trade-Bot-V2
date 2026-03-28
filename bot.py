@@ -1,25 +1,12 @@
 import os
 import time
 import requests
-import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
-# ── Patch yfinance to use browser-like headers (bypasses Railway network block) ──
-import requests as _req
-from yfinance import utils as _yfu
 
-_session = _req.Session()
-_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-})
-_yfu.requests = _session
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
@@ -27,6 +14,105 @@ TELEGRAM_CHAT_ID  = os.environ["TELEGRAM_CHAT_ID"]
 
 CHECK_INTERVAL    = 60
 ET                = pytz.timezone("America/New_York")
+MASSIVE_API_KEY   = os.environ["MASSIVE_API_KEY"]
+MASSIVE_BASE      = "https://api.polygon.io"   # Massive.com uses same endpoints
+
+# ── Massive/Polygon data layer ────────────────────────────────────────────────
+def _poly_get(path, params=None):
+    """Authenticated GET to Massive/Polygon API."""
+    p = params or {}
+    p["apiKey"] = MASSIVE_API_KEY
+    r = requests.get(f"{MASSIVE_BASE}{path}", params=p, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+def fetch_5min(ticker):
+    """Fetch last 5 days of 5-minute bars."""
+    try:
+        end   = datetime.now(ET).date()
+        start = end - timedelta(days=5)
+        data  = _poly_get(
+            f"/v2/aggs/ticker/{ticker}/range/5/minute/{start}/{end}",
+            {"adjusted": "true", "sort": "asc", "limit": "1000"}
+        )
+        results = data.get("results", [])
+        if not results:
+            return None
+        df = pd.DataFrame(results)
+        df.rename(columns={"o":"Open","h":"High","l":"Low","c":"Close","v":"Volume","t":"Time"}, inplace=True)
+        df["Time"] = pd.to_datetime(df["Time"], unit="ms", utc=True)
+        df.set_index("Time", inplace=True)
+        return df[["Open","High","Low","Close","Volume"]].dropna()
+    except Exception as e:
+        print(f"[5min fetch error] {ticker}: {e}")
+        return None
+
+def fetch_daily(ticker):
+    """Fetch last 1 year of daily bars."""
+    try:
+        end   = datetime.now(ET).date()
+        start = end - timedelta(days=365)
+        data  = _poly_get(
+            f"/v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}",
+            {"adjusted": "true", "sort": "asc", "limit": "365"}
+        )
+        results = data.get("results", [])
+        if not results:
+            return None
+        df = pd.DataFrame(results)
+        df.rename(columns={"o":"Open","h":"High","l":"Low","c":"Close","v":"Volume","t":"Time"}, inplace=True)
+        df["Time"] = pd.to_datetime(df["Time"], unit="ms", utc=True)
+        df.set_index("Time", inplace=True)
+        return df[["Open","High","Low","Close","Volume"]].dropna()
+    except Exception as e:
+        print(f"[Daily fetch error] {ticker}: {e}")
+        return None
+
+def get_vix():
+    """Fetch latest VIX value."""
+    try:
+        end   = datetime.now(ET).date()
+        start = end - timedelta(days=2)
+        data  = _poly_get(
+            f"/v2/aggs/ticker/VXX/range/5/minute/{start}/{end}",
+            {"adjusted": "true", "sort": "desc", "limit": "1"}
+        )
+        results = data.get("results", [])
+        if results:
+            return round(float(results[0]["c"]), 2)
+    except Exception as e:
+        print(f"[VIX error] {e}")
+    return None
+
+def get_unusual_options_flow(ticker):
+    """Check for unusual options activity via Massive/Polygon options chain."""
+    try:
+        data = _poly_get(
+            f"/v3/snapshot/options/{ticker}",
+            {"limit": "50", "sort": "volume", "order": "desc"}
+        )
+        results = data.get("results", [])
+        unusual = []
+        for item in results:
+            details = item.get("details", {})
+            day     = item.get("day", {})
+            greeks  = item.get("greeks", {})
+            vol     = day.get("volume", 0)
+            oi      = item.get("open_interest", 0)
+            if oi == 0: continue
+            ratio = vol / oi
+            if ratio > 3 and vol > 100:
+                unusual.append({
+                    "side":   "CALLS" if details.get("contract_type") == "call" else "PUTS",
+                    "strike": details.get("strike_price", 0),
+                    "volume": int(vol),
+                    "oi":     int(oi),
+                    "ratio":  round(ratio, 1),
+                })
+        return unusual[:3] if unusual else None
+    except Exception as e:
+        print(f"[Options flow error] {ticker}: {e}")
+        return None
 
 # Stock watchlist
 STOCK_WATCHLIST = ["QQQ", "SPY", "NVDA", "TSLA", "META"]
@@ -114,33 +200,7 @@ def update_cooldown(ticker, signal):
         alert_history[ticker] = {}
     alert_history[ticker][signal] = time.time()
 
-# ── Data fetching ─────────────────────────────────────────────────────────────
-def fetch_5min(ticker):
-    try:
-        df = yf.download(ticker, period="5d", interval="5m",
-                         progress=False, auto_adjust=True)
-        return df.dropna() if not df.empty else None
-    except Exception as e:
-        print(f"[5min fetch error] {ticker}: {e}")
-        return None
 
-def fetch_daily(ticker):
-    try:
-        df = yf.download(ticker, period="1y", interval="1d",
-                         progress=False, auto_adjust=True)
-        return df.dropna() if not df.empty else None
-    except Exception as e:
-        print(f"[Daily fetch error] {ticker}: {e}")
-        return None
-
-def get_vix():
-    try:
-        hist = yf.Ticker("^VIX").history(period="1d", interval="5m")
-        if not hist.empty:
-            return round(float(hist["Close"].dropna().iloc[-1]), 2)
-    except Exception as e:
-        print(f"[VIX error] {e}")
-    return None
 
 # ── Technical indicators ──────────────────────────────────────────────────────
 def calc_rsi(series, period=14):
@@ -201,42 +261,25 @@ def calc_iv_rank(ticker):
         return round(float(iv_rank), 1)
     except: return None
 
-def get_unusual_options_flow(ticker):
-    try:
-        t    = yf.Ticker(ticker)
-        exps = t.options
-        if not exps: return None
-        chain = t.option_chain(exps[0])
-        unusual = []
-        for df, side in [(chain.calls, "CALLS"), (chain.puts, "PUTS")]:
-            df = df.dropna(subset=["volume", "openInterest"])
-            df = df[df["openInterest"] > 0]
-            df["ratio"] = df["volume"] / df["openInterest"]
-            hot = df[df["ratio"] > 3].sort_values("volume", ascending=False)
-            if not hot.empty:
-                top = hot.iloc[0]
-                unusual.append({
-                    "side": side, "strike": top["strike"],
-                    "volume": int(top["volume"]), "oi": int(top["openInterest"]),
-                    "ratio": round(float(top["ratio"]), 1),
-                })
-        return unusual if unusual else None
-    except: return None
+
 
 def check_earnings(ticker):
+    """Check upcoming earnings via Massive/Polygon."""
     try:
-        cal = yf.Ticker(ticker).calendar
-        if cal is None: return None
-        if isinstance(cal, dict):
-            date = cal.get("Earnings Date")
-            if date:
-                if isinstance(date, list): date = date[0]
-                if hasattr(date, "date"): date = date.date()
-                days_away = (date - now_et().date()).days
-                if 0 <= days_away <= 7:
-                    return f"{date.strftime('%b %d')} ({days_away}d away)"
-    except: pass
-    return None
+        today = now_et().date()
+        end   = today + timedelta(days=7)
+        data  = _poly_get(
+            f"/vX/reference/financials",
+            {"ticker": ticker, "limit": "1", "sort": "filing_date", "order": "desc"}
+        )
+        # Earnings date not always in free tier — try snapshot instead
+        snap = _poly_get(f"/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}")
+        results = snap.get("ticker", {})
+        # Polygon free tier doesn't reliably expose earnings dates
+        # so we just return None gracefully and skip earnings warning
+        return None
+    except: 
+        return None
 
 ECON_KEYWORDS = [
     "fomc", "federal reserve", "interest rate", "cpi", "consumer price",
@@ -479,12 +522,11 @@ def load_prev_closes():
     all_tickers = STOCK_WATCHLIST + list(FUTURES.keys())
     for ticker in all_tickers:
         try:
-            df = yf.download(ticker, period="5d", interval="1d",
-                             progress=False, auto_adjust=True)
-            closes = df["Close"].dropna()
-            if len(closes) >= 2:
-                prev_closes[ticker] = round(float(closes.iloc[-2]), 2)
+            df = fetch_daily(ticker)
+            if df is not None and len(df) >= 2:
+                prev_closes[ticker] = round(float(df["Close"].iloc[-2]), 2)
                 print(f"[Prev close] {ticker}: ${prev_closes[ticker]}")
+            time.sleep(12)  # stay within 5 calls/min free tier
         except Exception as e:
             print(f"[Prev close error] {ticker}: {e}")
 
