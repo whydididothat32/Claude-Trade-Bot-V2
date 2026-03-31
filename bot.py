@@ -294,13 +294,25 @@ def scan_ticker(ticker, vix):
     )
     vwap_ok = (trend == "CALLS" and price > vwap) or (trend == "PUTS" and price < vwap)
 
-    conditions = [trend is not None, vol_spike, vix <= VIX_MAX, rsi_ok, vwap_ok]
+    # VIX removed from scoring — shown as context only
+    if vix is None:
+        vix_label, vix_emoji = "Unknown", "❓"
+    elif vix < 20:
+        vix_label, vix_emoji = "Calm — ideal conditions", "🟢"
+    elif vix < 30:
+        vix_label, vix_emoji = "Elevated — size down slightly", "🟡"
+    elif vix < 40:
+        vix_label, vix_emoji = "High — widen stops, reduce size", "🟠"
+    else:
+        vix_label, vix_emoji = "Extreme — trade with caution", "🔴"
+
+    conditions = [trend is not None, vol_spike, rsi_ok, vwap_ok]
     score      = sum(conditions)
 
     print(f"  {ticker}: ${price} | Trend:{trend} | Vol:{vol_spike}({vol_ratio}x) "
           f"| RSI:{rsi} | VWAP:{'✅' if vwap_ok else '❌'} | Score:{score}/5")
 
-    if trend and score >= 4 and cooldown_ok(ticker, trend):
+    if trend and score >= 3 and cooldown_ok(ticker, trend):
         emoji     = "🟢" if trend == "CALLS" else "🔴"
         direction = "CALLS ↑" if trend == "CALLS" else "PUTS ↓"
         vwap_rel  = "above ✅" if price > vwap else "below ⚠️"
@@ -313,7 +325,7 @@ def scan_ticker(ticker, vix):
             f"{emoji} <b>{ticker} SIGNAL — {direction}</b> [🌅 Morning]\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"💰 Price: <b>${price:.2f}</b>\n"
-            f"😌 VIX: <b>{vix}</b> ({'✅' if vix <= VIX_MAX else '⚠️'})\n"
+            f"{vix_emoji} VIX: <b>{vix}</b> — {vix_label}\n"
             f"📈 Volume: <b>{vol_ratio}x avg</b>\n"
             f"📊 VWAP: <b>${vwap:.2f}</b> — price {vwap_rel}\n"
             f"💹 RSI: <b>{rsi}</b>\n"
