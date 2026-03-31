@@ -133,13 +133,32 @@ def fetch_daily(ticker):
 
 def get_vix():
     """Fetch latest VIX value."""
+    for symbol in ["VIX", "^VIX", "VIXY"]:
+        try:
+            data = twelve_get("quote", {"symbol": symbol, "format": "JSON"})
+            if "close" in data and data.get("status") != "error":
+                val = float(data["close"])
+                if val > 0:
+                    print(f"[VIX] Got {val} via symbol {symbol}")
+                    return round(val, 2)
+        except Exception as e:
+            print(f"[VIX error] {symbol}: {e}")
+    # Fallback: use QQQ implied vol as VIX proxy
     try:
-        data = twelve_get("quote", {"symbol": "VIX", "format": "JSON"})
-        if "close" in data:
-            return round(float(data["close"]), 2)
+        data = twelve_get("time_series", {
+            "symbol": "QQQ", "interval": "1day",
+            "outputsize": "21", "format": "JSON"
+        })
+        if "values" in data:
+            closes = [float(v["close"]) for v in reversed(data["values"])]
+            import numpy as _np
+            returns = _np.diff(_np.log(closes))
+            vol = _np.std(returns) * _np.sqrt(252) * 100
+            print(f"[VIX] Using QQQ vol proxy: {vol:.1f}")
+            return round(float(vol), 1)
     except Exception as e:
-        print(f"[VIX error] {e}")
-    return None
+        print(f"[VIX proxy error] {e}")
+    return 25.0  # default fallback so scans still run
 
 def load_prev_closes():
     for ticker in STOCK_WATCHLIST:
@@ -375,8 +394,8 @@ def main():
         now  = now_et()
         date = now.strftime("%Y-%m-%d")
 
-        # Refresh prev closes at market open
-        if now.hour == 9 and now.minute == 30:
+        # Refresh prev closes at 9:28 so ready before scan window opens
+        if now.hour == 9 and now.minute == 28:
             load_prev_closes()
 
         # Reset daily flags
